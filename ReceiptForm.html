@@ -79,7 +79,8 @@
   </div>
 
 <script>
-  const DEFAULT_SHEET = <?= JSON.stringify(defaultSheet) ?>;
+  const DEFAULT_SHEET = <?= defaultSheet ?>;
+  const KEY = <?= accessKey ?>;
   const $ = id => document.getElementById(id);
   let upload = null;     // { fileId, url, ... }
   let type = 'out';
@@ -90,7 +91,7 @@
     try { saved = localStorage.getItem('pc_sheet') || ''; } catch (e) {}
     const pick = DEFAULT_SHEET && list.includes(DEFAULT_SHEET) ? DEFAULT_SHEET : (list.includes(saved) ? saved : list[0]);
     $('sheet').innerHTML = list.map(n => `<option ${n === pick ? 'selected' : ''}>${n}</option>`).join('');
-  }).withFailureHandler(err => status('err', err.message)).getSheetsList();
+  }).withFailureHandler(err => status('err', err.message)).getSheetsList(KEY);
 
   $('sheet').onchange = () => { try { localStorage.setItem('pc_sheet', $('sheet').value); } catch (e) {} };
 
@@ -132,7 +133,7 @@
         status('err', '❌ ' + err.message);
         drop.style.display = 'block';
       })
-      .uploadAndAnalyze(payload);
+      .uploadAndAnalyze(Object.assign(payload, { k: KEY }));
   }
 
   function readRaw(file) {
@@ -218,12 +219,12 @@
         sheetName: $('sheet').value,
         date: $('date').value,
         amount, type, description,
-        url: upload.url, fileId: upload.fileId,
+        url: upload.url, fileId: upload.fileId, k: KEY,
       });
   }
 
   function discard() {
-    if (upload && upload.fileId) google.script.run.discardUpload(upload.fileId);
+    if (upload && upload.fileId) google.script.run.discardUpload(upload.fileId, KEY);
     upload = null;
   }
 

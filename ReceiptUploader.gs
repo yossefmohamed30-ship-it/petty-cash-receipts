@@ -19,13 +19,18 @@ function onOpen() {
 function openSidebar() {
   const t = HtmlService.createTemplateFromFile('ReceiptForm');
   t.defaultSheet = SpreadsheetApp.getActiveSheet().getName();
+  t.accessKey = getKey_();
   SpreadsheetApp.getUi().showSidebar(t.evaluate().setTitle('إضافة إيصال'));
 }
 
 // نفس الصفحة كـ Web App (تفتحها في تاب أو من الموبايل)
-function doGet() {
+function doGet(e) {
+  if (!e || !e.parameter || e.parameter.k !== getKey_()) {
+    return HtmlService.createHtmlOutput('<h2 style="font-family:sans-serif;text-align:center;margin-top:40px">⛔ اللينك ده مش صح</h2>');
+  }
   const t = HtmlService.createTemplateFromFile('ReceiptForm');
   t.defaultSheet = '';
+  t.accessKey = e.parameter.k;
   return t.evaluate()
     .setTitle('إضافة إيصال')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
@@ -42,6 +47,23 @@ function setApiKey() {
 }
 
 /***** Helpers *****/
+// مفتاح سري في اللينك — محدش يقدر يستخدم الصفحة من غيره
+function getKey_() {
+  const p = PropertiesService.getScriptProperties();
+  let k = p.getProperty('ACCESS_KEY');
+  if (!k) { k = Utilities.getUuid().replace(/-/g, ''); p.setProperty('ACCESS_KEY', k); }
+  return k;
+}
+
+function checkKey_(k) {
+  if (k !== getKey_()) throw new Error('⛔ مش مسموح');
+}
+
+// شغّلها من المحرر عشان تشوف المفتاح في الـ Execution log
+function showAccessKey() {
+  Logger.log('KEY=' + getKey_());
+}
+
 function ss_() {
   return SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
 }
@@ -71,7 +93,8 @@ function lastRowInCol_(sheet, col) {
 /***** بيستدعيها الـ HTML *****/
 
 // التابات اللي فيها نفس الهيدر (Date / Amount / Description / link)
-function getSheetsList() {
+function getSheetsList(k) {
+  checkKey_(k);
   const sheets = ss_().getSheets();
   const matching = sheets.filter(sh => {
     if (sh.getLastColumn() < 4) return false;
@@ -83,6 +106,7 @@ function getSheetsList() {
 
 // يرفع الصورة على الدرايف ويحللها
 function uploadAndAnalyze(data) {
+  checkKey_(data.k);
   const bytes = Utilities.base64Decode(data.base64);
   const blob = Utilities.newBlob(bytes, data.mimeType, data.fileName || ('receipt_' + Date.now()));
   const file = getFolder_().createFile(blob);
@@ -146,6 +170,7 @@ function analyze_(base64, mimeType) {
 
 // يسجل الصف في الشيت
 function saveEntry(e) {
+  checkKey_(e.k);
   const lock = LockService.getDocumentLock();
   lock.waitLock(20000);
   try {
@@ -175,7 +200,8 @@ function saveEntry(e) {
 }
 
 // لو لغيت قبل ما تسجل — الصورة تروح الـ Trash
-function discardUpload(fileId) {
+function discardUpload(fileId, k) {
+  checkKey_(k);
   if (fileId) DriveApp.getFileById(fileId).setTrashed(true);
 }
 
