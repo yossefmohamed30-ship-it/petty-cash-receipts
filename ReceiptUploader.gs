@@ -239,22 +239,28 @@ function parseReceiptText_(raw) {
   const numRe = /\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?/g;
   const nums = s => (s.match(numRe) || []).map(x => Number(x.replace(/,/g, ''))).filter(n => n > 0 && n < 10000000);
 
-  const strong = /(الإجمالي|الاجمالي|إجمالي|اجمالي|الصافي|المطلوب|total|grand)/i;
+  // سطور مش المبلغ: حدود، رصيد، رسوم، متبقي
+  const skip = /(limit|remaining|balance|available|fee|fees|charge|حد |الحد|رصيد|متبقي|المتبقي|رسوم|عمولة|مصاريف)/i;
+  const strong = /(الإجمالي|الاجمالي|إجمالي|اجمالي|الصافي|المطلوب|total|grand|payment|transfer|transferred|sent|تحويل|المحول|تم تحويل|المبلغ المحول)/i;
   const medium = /(المبلغ|مبلغ|amount|paid|المدفوع|EGP|جنيه|ج\.م|L\.E|LE)/i;
 
   let amount = null;
   for (const re of [strong, medium]) {
     const cands = [];
     lines.forEach((l, i) => {
-      if (re.test(l)) {
+      if (re.test(l) && !skip.test(l)) {
         cands.push(...nums(l));
-        if (!nums(l).length && lines[i + 1]) cands.push(...nums(lines[i + 1]));
+        for (let j = 1; j <= 2 && !nums(l).length && lines[i + j]; j++) {
+          if (skip.test(lines[i + j])) break;
+          const n = nums(lines[i + j]);
+          if (n.length) { cands.push(...n); break; }
+        }
       }
     });
     if (cands.length) { amount = Math.max(...cands); break; }
   }
   if (amount === null) {
-    const all = nums(clean);
+    const all = nums(lines.filter(l => !skip.test(l)).join('\n'));
     const dec = all.filter(n => n % 1 !== 0);
     amount = dec.length ? Math.max(...dec) : (all.length ? Math.max(...all) : null);
   }

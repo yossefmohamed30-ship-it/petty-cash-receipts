@@ -39,6 +39,14 @@
   .hint { font-size:12px; color:var(--mu); margin-top:4px; }
   #form { display:none; }
   a { color:var(--g); }
+  .progress { display:none; justify-content:space-between; align-items:center; margin-top:12px; font-weight:700; font-size:15px; }
+  .link { border:0; background:none; color:var(--g); font-size:14px; cursor:pointer; font-family:inherit; font-weight:600; }
+  .strip { display:none; gap:6px; overflow-x:auto; margin-top:8px; padding-bottom:4px; }
+  .th { position:relative; flex:0 0 52px; height:52px; border-radius:8px; border:2px solid var(--bd); overflow:hidden; cursor:pointer; background:#fafafa; display:flex; align-items:center; justify-content:center; font-size:11px; }
+  .th img { width:100%; height:100%; object-fit:cover; }
+  .th.cur { border-color:var(--g); }
+  .th.saved, .th.skipped { opacity:.45; }
+  .th b { position:absolute; bottom:1px; left:2px; font-size:13px; }
 </style>
 </head>
 <body>
@@ -48,11 +56,13 @@
   <select id="sheet"><option>...</option></select>
 
   <div class="drop" id="drop">
-    📷 ارفع صورة الإيصال
-    <small>اضغط أو اسحب الصورة هنا (صورة أو PDF)</small>
+    📷 ارفع صور الإيصالات
+    <small>تقدر تختار صورة واحدة أو كذا صورة مع بعض</small>
   </div>
-  <input type="file" id="file" accept="image/*,application/pdf" hidden>
+  <input type="file" id="file" accept="image/*,application/pdf" multiple hidden>
 
+  <div id="progress" class="progress"><span></span><button type="button" id="more" class="link">➕ صور تانية</button></div>
+  <div id="strip" class="strip"></div>
   <img id="preview" alt="">
   <div class="status" id="status"></div>
 
@@ -74,7 +84,7 @@
     <textarea id="desc" placeholder="اكتب الوصف..."></textarea>
 
     <div class="btns">
-      <button class="btn sec" id="cancel">إلغاء</button>
+      <button class="btn sec" id="cancel">تخطّي ✖️</button>
       <button class="btn pri" id="done">✅ Done</button>
     </div>
   </div>
@@ -84,8 +94,12 @@
   const $ = id => document.getElementById(id);
   let KEY = new URLSearchParams(location.search).get('k') || '';
   try { if (KEY) localStorage.setItem('pc_key', KEY); else KEY = localStorage.getItem('pc_key') || ''; } catch (e) {}
-  let upload = null;     // { fileId, url, ... }
+
+  // الطابور: كل صورة = { thumb, payload, state: 'wait'|'busy'|'ready'|'error'|'saved'|'skipped', res, err }
+  let queue = [];
+  let cur = -1;          // الصورة المعروضة دلوقتي
   let type = 'out';
+  let saving = false;
 
   async function api(action, payload) {
     const res = await fetch(API, { method: 'POST', body: JSON.stringify(Object.assign({ action: action, k: KEY }, payload || {})) });
@@ -105,38 +119,121 @@
 
   $('sheet').onchange = () => { try { localStorage.setItem('pc_sheet', $('sheet').value); } catch (e) {} };
 
-  // ---------- رفع الصورة ----------
+  // ---------- اختيار الصور ----------
   const drop = $('drop');
   drop.onclick = () => $('file').click();
   drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
   drop.ondragleave = () => drop.classList.remove('over');
-  drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]); };
-  $('file').onchange = e => { if (e.target.files[0]) handleFile(e.target.files[0]); e.target.value = ''; };
+  drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); addFiles([...e.dataTransfer.files]); };
+  $('file').onchange = e => { addFiles([...e.target.files]); e.target.value = ''; };
+  $('more').onclick = () => $('file').click();
   document.addEventListener('paste', e => {
-    const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'));
-    if (item) handleFile(item.getAsFile());
+    const files = [...(e.clipboardData?.items || [])].filter(i => i.type.startsWith('image/')).map(i => i.getAsFile());
+    if (files.length) addFiles(files);
   });
 
-  async function handleFile(file) {
-    if (upload) discard();
-    resetForm();
+  async function addFiles(files) {
+    files = files.filter(f => f && (f.type.startsWith('image/') || f.type === 'application/pdf'));
+    if (!files.length) return;
     drop.style.display = 'none';
-    status('info', 'بيرفع الصورة ويحللها...<span class="spin"></span>');
-
-    let payload;
-    try {
-      payload = file.type === 'application/pdf' ? await readRaw(file) : await compress(file);
-    } catch (e) {
-      payload = await readRaw(file);
+    for (const file of files) {
+      let payload;
+      try { payload = file.type === 'application/pdf' ? await readRaw(file) : await compress(file); }
+      catch (e) { payload = await readRaw(file); }
+      queue.push({
+        payload: payload,
+        thumb: payload.mimeType.startsWith('image/') ? 'data:' + payload.mimeType + ';base64,' + payload.base64 : '',
+        state: 'wait',
+      });
     }
-    if (payload.mimeType.startsWith('image/')) {
-      $('preview').src = 'data:' + payload.mimeType + ';base64,' + payload.base64;
-      $('preview').style.display = 'block';
-    }
+    renderStrip();
+    pump();
+    if (cur === -1 || isDone(queue[cur])) next();
+  }
 
-    api('rcpt_upload', payload)
-      .then(res => { upload = res; showForm(res); })
-      .catch(err => { status('err', '❌ ' + err.message); drop.style.display = 'block'; });
+  // بيرفع ويحلل في الخلفية — اتنين في نفس الوقت
+  let running = 0;
+  function pump() {
+    while (running < 2) {
+      const item = queue.find(q => q.state === 'wait');
+      if (!item) return;
+      item.state = 'busy'; running++;
+      api('rcpt_upload', item.payload)
+        .then(res => { item.res = res; item.state = 'ready'; })
+        .catch(err => { item.err = err.message; item.state = 'error'; })
+        .finally(() => {
+          running--; item.payload = null;
+          renderStrip();
+          if (queue[cur] === item) show();
+          pump();
+        });
+    }
+  }
+
+  function isDone(q) { return q && (q.state === 'saved' || q.state === 'skipped'); }
+
+  function next() {
+    const i = queue.findIndex(q => !isDone(q));
+    cur = i;
+    if (i === -1) { finishAll(); return; }
+    show();
+  }
+
+  function show() {
+    const item = queue[cur];
+    renderStrip();
+    $('progress').style.display = 'flex';
+    $('progress').firstElementChild.textContent = `إيصال ${cur + 1} من ${queue.length}`;
+    if (item.thumb) { $('preview').src = item.thumb; $('preview').style.display = 'block'; }
+    else $('preview').style.display = 'none';
+
+    if (item.state === 'wait' || item.state === 'busy') {
+      $('form').style.display = 'none';
+      status('info', 'بيرفع الصورة ويحللها...<span class="spin"></span>');
+      return;
+    }
+    if (item.state === 'error') {
+      $('form').style.display = 'none';
+      status('err', '❌ الصورة دي ما اترفعتش: ' + item.err + ' <br><button class="btn sec" style="margin-top:8px" onclick="retry()">🔄 جرّب تاني</button> <button class="btn sec" style="margin-top:8px" onclick="skip()">تخطّي</button>');
+      return;
+    }
+    fillForm(item.res);
+  }
+
+  function fillForm(res) {
+    $('form').style.display = 'block';
+    $('desc').value = ''; $('desc').placeholder = 'اكتب الوصف...';
+    $('done').disabled = $('cancel').disabled = false;
+    $('date').value = res.date || today();
+    $('amount').value = res.amount != null ? Math.abs(res.amount) : '';
+    setType(res.type || 'out');
+    if (res.aiError) {
+      status('err', '⚠️ الصورة اترفعت بس التحليل فشل — اكتب المبلغ بنفسك');
+      $('aiHint').textContent = '';
+      $('amount').focus();
+      return;
+    }
+    status('ok', `✅ اترفعت — <a href="${res.url}" target="_blank">فتح الإيصال</a>`);
+    $('aiHint').textContent = [res.merchant, res.summary].filter(Boolean).join(' — ');
+    if (res.summary) $('desc').placeholder = res.summary;
+    res.amount != null ? $('desc').focus() : $('amount').focus();
+  }
+
+  window.retry = () => { const it = queue[cur]; it.state = 'wait'; it.err = null; if (!it.payload) { skip(); return; } pump(); show(); };
+  window.skip = () => { queue[cur].state = 'skipped'; next(); };
+
+  // ---------- شريط الصور الصغيرة ----------
+  function renderStrip() {
+    const icons = { wait: '⏳', busy: '⏳', ready: '', error: '⚠️', saved: '✅', skipped: '✖️' };
+    $('strip').innerHTML = queue.map((q, i) =>
+      `<div class="th ${i === cur ? 'cur' : ''} ${q.state}" data-i="${i}">` +
+      (q.thumb ? `<img src="${q.thumb}">` : '<span>PDF</span>') +
+      (icons[q.state] ? `<b>${icons[q.state]}</b>` : '') + '</div>').join('');
+    $('strip').style.display = queue.length > 1 ? 'flex' : 'none';
+    $('strip').querySelectorAll('.th').forEach(el => el.onclick = () => {
+      const i = +el.dataset.i;
+      if (!isDone(queue[i]) && !saving) { cur = i; show(); }
+    });
   }
 
   function readRaw(file) {
@@ -167,24 +264,6 @@
   }
 
   // ---------- الفورم ----------
-  function showForm(res) {
-    $('form').style.display = 'block';
-    $('date').value = res.date || today();
-    $('amount').value = res.amount != null ? Math.abs(res.amount) : '';
-    setType(res.type || 'out');
-
-    if (res.aiError) {
-      status('err', '⚠️ الصورة اترفعت بس التحليل فشل — اكتب المبلغ بنفسك<br><small>' + res.aiError + '</small>');
-      $('aiHint').textContent = '';
-      $('amount').focus();
-      return;
-    }
-    status('ok', `✅ اترفعت — <a href="${res.url}" target="_blank">فتح الإيصال</a>`);
-    $('aiHint').textContent = [res.merchant, res.summary].filter(Boolean).join(' — ');
-    if (res.summary) $('desc').placeholder = res.summary;
-    res.amount != null ? $('desc').focus() : $('amount').focus();
-  }
-
   document.querySelectorAll('.seg button').forEach(b => b.onclick = () => setType(b.dataset.t));
   function setType(t) {
     type = t;
@@ -195,51 +274,62 @@
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); save(); }
   });
   $('done').onclick = save;
-  $('cancel').onclick = () => { discard(); resetAll(); };
+  $('cancel').onclick = () => {
+    const item = queue[cur];
+    if (item && item.res && item.res.fileId) api('rcpt_discard', { fileId: item.res.fileId }).catch(() => {});
+    item.state = 'skipped';
+    next();
+  };
 
   function save() {
+    const item = queue[cur];
+    if (!item || item.state !== 'ready' || saving) return;
     const amount = parseFloat($('amount').value);
     const description = $('desc').value.trim() || $('desc').placeholder.replace('اكتب الوصف...', '').trim();
     if (!amount) { status('err', 'اكتب المبلغ'); $('amount').focus(); return; }
     if (!description) { status('err', 'اكتب صرفته في إيه'); $('desc').focus(); return; }
     if (!$('date').value) { status('err', 'اختار التاريخ'); return; }
 
+    saving = true;
     $('done').disabled = $('cancel').disabled = true;
     status('info', 'بيسجل في الشيت...<span class="spin"></span>');
+    const t = type;
 
     api('rcpt_save', {
         sheetName: $('sheet').value,
         date: $('date').value,
-        amount, type, description,
-        url: upload.url, fileId: upload.fileId,
+        amount, type: t, description,
+        url: item.res.url, fileId: item.res.fileId,
       })
       .then(r => {
-        const sign = type === 'in' ? '+' : '-';
-        upload = null;
-        resetAll();
-        status('ok', `✅ اتسجل في "${r.sheet}" صف ${r.row} (${sign}${amount}) — ارفع الإيصال اللي بعده 👇`);
+        saving = false;
+        item.state = 'saved';
+        item.saved = { row: r.row, sheet: r.sheet, amount: (t === 'in' ? '+' : '-') + amount };
+        next();
+        if (cur !== -1) {
+          const msg = `✅ اتسجل الإيصال اللي فات في صف ${r.row}`;
+          const s = $('status'); if (queue[cur].state !== 'ready') return;
+          s.innerHTML = msg + ' — ' + s.innerHTML;
+        }
       })
       .catch(err => {
+        saving = false;
         $('done').disabled = $('cancel').disabled = false;
         status('err', '❌ ' + err.message);
       });
   }
 
-  function discard() {
-    if (upload && upload.fileId) api('rcpt_discard', { fileId: upload.fileId }).catch(() => {});
-    upload = null;
-  }
-
-  function resetForm() {
+  function finishAll() {
+    const saved = queue.filter(q => q.state === 'saved');
     $('form').style.display = 'none';
-    $('amount').value = ''; $('desc').value = ''; $('desc').placeholder = 'اكتب الوصف...';
-    $('aiHint').textContent = '';
-    $('done').disabled = $('cancel').disabled = false;
-  }
-  function resetAll() {
-    resetForm();
-    $('preview').style.display = 'none'; $('preview').src = '';
-    $('status').className = 'status';
+    $('preview').style.display = 'none';
+    $('progress').style.display = 'none';
+    renderStrip();
+    status('ok', saved.length
+      ? `✅ خلصنا — اتسجل ${saved.length} إيصال (صفوف ${saved.map(q => q.saved.row).join('، ')}) 👇 ارفع اللي بعدهم`
+      : 'مفيش حاجة اتسجلت');
+    queue = []; cur = -1;
+    setTimeout(() => { $('strip').style.display = 'none'; }, 0);
     drop.style.display = 'block';
   }
 
