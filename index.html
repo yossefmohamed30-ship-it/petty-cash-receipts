@@ -151,23 +151,26 @@
     if (cur === -1 || isDone(queue[cur])) next();
   }
 
-  // بيرفع ويحلل في الخلفية — اتنين في نفس الوقت
+  // بيرفع ويحلل في الخلفية — واحدة ورا التانية، ولو فشلت بيحاول تاني لوحده
   let running = 0;
   function pump() {
-    while (running < 2) {
-      const item = queue.find(q => q.state === 'wait');
-      if (!item) return;
-      item.state = 'busy'; running++;
-      api('rcpt_upload', item.payload)
-        .then(res => { item.res = res; item.state = 'ready'; })
-        .catch(err => { item.err = err.message; item.state = 'error'; })
-        .finally(() => {
-          running--; item.payload = null;
-          renderStrip();
-          if (queue[cur] === item) show();
-          pump();
-        });
-    }
+    if (running) return;
+    const item = queue.find(q => q.state === 'wait');
+    if (!item) return;
+    item.state = 'busy'; running = 1;
+    api('rcpt_upload', item.payload)
+      .then(res => { item.res = res; item.state = 'ready'; item.payload = null; })
+      .catch(err => {
+        item.tries = (item.tries || 0) + 1;
+        if (item.tries < 3) { item.state = 'wait'; }
+        else { item.err = err.message; item.state = 'error'; }
+      })
+      .finally(() => {
+        running = 0;
+        renderStrip();
+        if (queue[cur] === item) show();
+        setTimeout(pump, item.state === 'wait' ? 2500 : 0);
+      });
   }
 
   function isDone(q) { return q && (q.state === 'saved' || q.state === 'skipped'); }
@@ -194,7 +197,7 @@
     }
     if (item.state === 'error') {
       $('form').style.display = 'none';
-      status('err', '❌ الصورة دي ما اترفعتش: ' + item.err + ' <br><button class="btn sec" style="margin-top:8px" onclick="retry()">🔄 جرّب تاني</button> <button class="btn sec" style="margin-top:8px" onclick="skip()">تخطّي</button>');
+      status('err', '❌ الصورة دي ما اترفعتش: ' + item.err + ' <br><small>(اتجربت 3 مرات)</small><br><button class="btn sec" style="margin-top:8px" onclick="retry()">🔄 جرّب تاني</button> <button class="btn sec" style="margin-top:8px" onclick="skip()">تخطّي</button>');
       return;
     }
     fillForm(item.res);
@@ -219,7 +222,7 @@
     res.amount != null ? $('desc').focus() : $('amount').focus();
   }
 
-  window.retry = () => { const it = queue[cur]; it.state = 'wait'; it.err = null; if (!it.payload) { skip(); return; } pump(); show(); };
+  window.retry = () => { const it = queue[cur]; it.state = 'wait'; it.err = null; it.tries = 0; pump(); show(); };
   window.skip = () => { queue[cur].state = 'skipped'; next(); };
 
   // ---------- شريط الصور الصغيرة ----------
