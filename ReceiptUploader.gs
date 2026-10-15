@@ -98,7 +98,7 @@ function uploadAndAnalyze(data) {
 
 function analyze_(base64, mimeType) {
   const key = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
-  if (!key) throw new Error('مفيش مفتاح Gemini — من المنيو: 🧾 المصروفات ← 🔑 إعداد مفتاح Gemini');
+  if (!key) return ocrAnalyze_(base64, mimeType); // من غير مفتاح: OCR بتاع جوجل درايف (ببلاش)
 
   const prompt =
     'This is an Egyptian receipt, invoice, or money-transfer screenshot (InstaPay, OPay, Vodafone Cash, bank app, shop receipt, etc.). ' +
@@ -178,3 +178,63 @@ function saveEntry(e) {
 function discardUpload(fileId) {
   if (fileId) DriveApp.getFileById(fileId).setTrashed(true);
 }
+
+/***** OCR من غير مفتاح — جوجل درايف بيقرا الصورة *****/
+function ocrAnalyze_(base64, mimeType) {
+  const blob = Utilities.newBlob(Utilities.base64Decode(base64), mimeType, 'ocr_tmp_' + Date.now());
+  const doc = Drive.Files.create({ name: 'ocr_tmp_' + Date.now(), mimeType: 'application/vnd.google-apps.document' }, blob, { ocrLanguage: 'ar' });
+  let text = '';
+  try {
+    text = UrlFetchApp.fetch('https://www.googleapis.com/drive/v3/files/' + doc.id + '/export?mimeType=text/plain',
+      { headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, muteHttpExceptions: true }).getContentText();
+  } finally {
+    try { DriveApp.getFileById(doc.id).setTrashed(true); } catch (err) {}
+  }
+  return parseReceiptText_(text);
+}
+
+function parseReceiptText_(raw) {
+  const t = String(raw)
+    .replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d))
+    .replace(/[۰-۹]/g, d => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d))
+    .replace(/٫/g, '.').replace(/٬/g, ',');
+
+  // التاريخ
+  let date = null, m;
+  if ((m = t.match(/(20\d{2})[-\/.](\d{1,2})[-\/.](\d{1,2})/))) date = m[1] + '-' + pad_(m[2]) + '-' + pad_(m[3]);
+  else if ((m = t.match(/(\d{1,2})[-\/.](\d{1,2})[-\/.](20\d{2})/))) date = m[3] + '-' + pad_(m[2]) + '-' + pad_(m[1]);
+
+  // نشيل التواريخ والساعات والأرقام الطويلة (موبايلات / أرقام عمليات)
+  const clean = t
+    .replace(/\d{1,4}[-\/.]\d{1,2}[-\/.]\d{1,4}/g, ' ')
+    .replace(/\d{1,2}:\d{2}(:\d{2})?/g, ' ')
+    .replace(/\d{9,}/g, ' ');
+  const lines = clean.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const numRe = /\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?/g;
+  const nums = s => (s.match(numRe) || []).map(x => Number(x.replace(/,/g, ''))).filter(n => n > 0 && n < 10000000);
+
+  const strong = /(الإجمالي|الاجمالي|إجمالي|اجمالي|الصافي|المطلوب|total|grand)/i;
+  const medium = /(المبلغ|مبلغ|amount|paid|المدفوع|EGP|جنيه|ج\.م|L\.E|LE)/i;
+
+  let amount = null;
+  for (const re of [strong, medium]) {
+    const cands = [];
+    lines.forEach((l, i) => {
+      if (re.test(l)) {
+        cands.push(...nums(l));
+        if (!nums(l).length && lines[i + 1]) cands.push(...nums(lines[i + 1]));
+      }
+    });
+    if (cands.length) { amount = Math.max(...cands); break; }
+  }
+  if (amount === null) {
+    const all = nums(clean);
+    const dec = all.filter(n => n % 1 !== 0);
+    amount = dec.length ? Math.max(...dec) : (all.length ? Math.max(...all) : null);
+  }
+
+  const type = /(استلام|استلمت|received|وارد|إيداع|ايداع)/i.test(t) ? 'in' : 'out';
+  return { amount: amount, date: date, merchant: (lines.find(l => /[A-Za-z\u0600-\u06FF]{2,}/.test(l)) || '').slice(0, 40), type: type, summary: '' };
+}
+
+function pad_(n) { return String(n).padStart(2, '0'); }
