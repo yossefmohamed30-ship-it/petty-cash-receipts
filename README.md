@@ -17,3 +17,8 @@ Google Apps Script sidebar / web app for Google Sheets:
 6. Optional: **Deploy → Web app** to open it in its own tab / on mobile.
 
 Target sheet tabs need headers in row 1: `Date | Amount | Description | link`.
+
+## Mobile page (GitHub Pages)
+`index.html` is a static version of the form that talks to the Apps Script web app via `fetch` (POST, actions `rcpt_*`).
+Open it as `https://<user>.github.io/petty-cash-receipts/?k=<ACCESS_KEY>` — the key is stored in Script Properties (`showAccessKey()` logs it) and is never committed.
+`doPost` must route `rcpt_*` actions to `receiptApi_(data)`.

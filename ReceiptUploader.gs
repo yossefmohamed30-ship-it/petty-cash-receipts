@@ -264,3 +264,20 @@ function parseReceiptText_(raw) {
 }
 
 function pad_(n) { return String(n).padStart(2, '0'); }
+
+/***** API لصفحة GitHub Pages (بيتنادى من doPost في Code.gs) *****/
+function receiptApi_(data) {
+  let out;
+  try {
+    let result;
+    if (data.action === 'rcpt_sheets') result = getSheetsList(data.k);
+    else if (data.action === 'rcpt_upload') result = uploadAndAnalyze(data);
+    else if (data.action === 'rcpt_save') result = saveEntry(data);
+    else if (data.action === 'rcpt_discard') result = discardUpload(data.fileId, data.k) || true;
+    else throw new Error('unknown action');
+    out = { ok: true, result: result };
+  } catch (err) {
+    out = { ok: false, error: err.message };
+  }
+  return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
+}
